@@ -2,7 +2,7 @@ import tensorflow as tf
 
 from config import cfg
 from utils import get_batch_data
-from capsLayer import CapsConv
+from capsLayer import CapsLayer
 
 
 class CapsNet(object):
@@ -34,46 +34,49 @@ class CapsNet(object):
                                              padding='VALID')
             assert conv1.get_shape() == [cfg.batch_size, 20, 20, 256]
 
-        # TODO: Rewrite the 'CapsConv' class as a function, the capsLay
-        # function should be encapsulated into tow function, one like conv2d
-        # and another is fully_connected in Tensorflow.
-        # Primary Capsules, [batch_size, 1152, 8, 1]
+        # Primary Capsules layer, return [batch_size, 1152, 8, 1]
         with tf.variable_scope('PrimaryCaps_layer'):
-            primaryCaps = CapsConv(num_units=8, with_routing=False)
-            caps1 = primaryCaps(conv1, num_outputs=32, kernel_size=9, stride=2)
+            primaryCaps = CapsLayer(num_outputs=32, vec_len=8, with_routing=False, layer_type='CONV')
+            caps1 = primaryCaps(conv1, kernel_size=9, stride=2)
             assert caps1.get_shape() == [cfg.batch_size, 1152, 8, 1]
 
-        # DigitCaps layer, [batch_size, 10, 16, 1]
+        # DigitCaps layer, return [batch_size, 10, 16, 1]
         with tf.variable_scope('DigitCaps_layer'):
-            digitCaps = CapsConv(num_units=16, with_routing=True)
-            self.caps2 = digitCaps(caps1, num_outputs=10)
+            digitCaps = CapsLayer(num_outputs=10, vec_len=16, with_routing=True, layer_type='FC')
+            self.caps2 = digitCaps(caps1)
 
         # Decoder structure in Fig. 2
         # 1. Do masking, how:
         with tf.variable_scope('Masking'):
-            # a). calc ||v_c||, then do softmax(||v_c||)
-            # [batch_size, 10, 16, 1] => [batch_size, 10, 1, 1]
-            self.v_length = tf.sqrt(tf.reduce_sum(tf.square(self.caps2),
-                                                  axis=2, keep_dims=True))
-            self.softmax_v = tf.nn.softmax(self.v_length, dim=1)
-            assert self.softmax_v.get_shape() == [cfg.batch_size, 10, 1, 1]
+            # Method 1. masking with true label, default mode
+            if cfg.mask_with_y:
+                self.masked_v = tf.matmul(tf.squeeze(self.caps2), tf.reshape(self.Y, (-1, 10, 1)), transpose_a=True)
+                self.v_length = tf.sqrt(tf.reduce_sum(tf.square(self.caps2), axis=2, keep_dims=True))
+            # Method 2. Seems not work
+            else:
+                # a). calc ||v_c||, then do softmax(||v_c||)
+                # [batch_size, 10, 16, 1] => [batch_size, 10, 1, 1]
+                self.v_length = tf.sqrt(tf.reduce_sum(tf.square(self.caps2),
+                                                      axis=2, keep_dims=True))
+                self.softmax_v = tf.nn.softmax(self.v_length, dim=1)
+                assert self.softmax_v.get_shape() == [cfg.batch_size, 10, 1, 1]
 
-            # b). pick out the index of max softmax val of the 10 caps
-            # [batch_size, 10, 1, 1] => [batch_size] (index)
-            argmax_idx = tf.argmax(self.softmax_v, axis=1, output_type=tf.int32)
-            assert argmax_idx.get_shape() == [cfg.batch_size, 1, 1]
+                # b). pick out the index of max softmax val of the 10 caps
+                # [batch_size, 10, 1, 1] => [batch_size] (index)
+                argmax_idx = tf.to_int32(tf.argmax(self.softmax_v, axis=1))
+                assert argmax_idx.get_shape() == [cfg.batch_size, 1, 1]
 
-            # c). indexing
-            # It's not easy to understand the indexing process with argmax_idx
-            # as we are 3-dim animal
-            masked_v = []
-            argmax_idx = tf.reshape(argmax_idx, shape=(cfg.batch_size, ))
-            for batch_size in range(cfg.batch_size):
-                v = self.caps2[batch_size][argmax_idx[batch_size], :]
-                masked_v.append(tf.reshape(v, shape=(1, 1, 16, 1)))
+                # c). indexing
+                # It's not easy to understand the indexing process with argmax_idx
+                # as we are 3-dim animal
+                masked_v = []
+                argmax_idx = tf.reshape(argmax_idx, shape=(cfg.batch_size, ))
+                for batch_size in range(cfg.batch_size):
+                    v = self.caps2[batch_size][argmax_idx[batch_size], :]
+                    masked_v.append(tf.reshape(v, shape=(1, 1, 16, 1)))
 
-            self.masked_v = tf.concat(masked_v, axis=0)
-            assert self.masked_v.get_shape() == [cfg.batch_size, 1, 16, 1]
+                self.masked_v = tf.concat(masked_v, axis=0)
+                assert self.masked_v.get_shape() == [cfg.batch_size, 1, 16, 1]
 
         # 2. Reconstructe the MNIST images with 3 FC layers
         # [batch_size, 1, 16, 1] => [batch_size, 16] => [batch_size, 512]
